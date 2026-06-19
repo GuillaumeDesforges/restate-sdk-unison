@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "unison": {
+      "command": "nix",
+      "args": ["run", "nixpkgs#unison-ucm", "--", "mcp"]
+    }
+  }
+}
