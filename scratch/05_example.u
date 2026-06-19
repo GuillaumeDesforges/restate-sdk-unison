@@ -1,0 +1,36 @@
+use lib.unison_base_7_19_2
+use lib.unison_json_1_4_2
+use lib.unison_http_16_1_0
+use lib.unison_http_16_1_0.server
+
+-- ── Greeter service ───────────────────────────────────────────────────────────
+-- Virtual object: stateful per-key greet counter.
+-- Input:  UTF-8 encoded name (e.g. b"Alice")
+-- Output: UTF-8 encoded greeting (e.g. b"Hello, Alice! Greeted 3 times.")
+
+Restate.Example.Greeter.greet : '{Restate.Ctx, Restate.State, IO, Exception} Bytes
+Restate.Example.Greeter.greet = do
+  inp     = ctx.input
+  name    = Text.fromUtf8 (Restate.Input.inputBytes inp)
+  countBs = state.get "count"
+  count   = match countBs with
+    None    -> 0
+    Some bs ->
+      match Nat.fromText (Text.fromUtf8 bs) with
+        None   -> 0
+        Some n -> n
+  newCount = count + 1
+  state.set "count" (Text.toUtf8 (Nat.toText newCount))
+  Text.toUtf8 ("Hello, " ++ name ++ "! Greeted " ++ Nat.toText newCount ++ " times.")
+
+Restate.Example.Greeter.serviceDef : Restate.ServiceDef
+Restate.Example.Greeter.serviceDef =
+  hdl = Restate.HandlerDef.HandlerDef "greet" Restate.Example.Greeter.greet
+  Restate.ServiceDef.ServiceDef "Greeter" Restate.ServiceKind.RsVirtualObject [hdl]
+
+-- ── Entry point ───────────────────────────────────────────────────────────────
+-- Run with: `run Restate.Example.main` in UCM (requires nix develop env).
+
+Restate.Example.main : '{IO, Exception, Threads} ()
+Restate.Example.main = do
+  Restate.Endpoint.serve 9080 [Restate.Example.Greeter.serviceDef]

@@ -1,0 +1,105 @@
+use lib.unison_base_7_19_2
+use lib.unison_json_1_4_2
+
+-- ── Restate context ability ───────────────────────────────────────────────────
+
+ability Restate.Ctx where
+  ctx.input             : Restate.Input
+  ctx.sleep             : Text -> Nat -> ()
+  ctx.call              : Restate.Target -> Bytes -> Restate.CallHandles
+  ctx.send              : Restate.Target -> Bytes -> Nat -> ()
+  ctx.run               : Text -> '{IO, Exception} Bytes -> Bytes
+  ctx.await             : Nat -> Restate.NotifValue
+  ctx.awakeable         : Restate.AwakeableHandle
+  ctx.completeAwakeable : Text -> Either Restate.TerminalFailure Bytes -> ()
+
+ability Restate.State where
+  state.get      : Text -> Optional Bytes
+  state.set      : Text -> Bytes -> ()
+  state.clear    : Text -> ()
+  state.clearAll : ()
+  state.keys     : [Text]
+
+-- ── Progress loop ─────────────────────────────────────────────────────────────
+
+Restate.Vm.awaitHandle : Restate.Vm -> Nat ->{IO, Exception} Restate.NotifValue
+Restate.Vm.awaitHandle vm nh =
+  go _ =
+    match Restate.Vm.doAwait vm (Restate.Future.FutSingle nh) with
+      Restate.AwaitResult.AnyCompleted        -> Restate.Vm.takeNotification vm nh
+      Restate.AwaitResult.WaitingExternal _ _ -> Restate.NotifValue.NVoid
+      Restate.AwaitResult.ExecuteRun _        -> go ()
+      Restate.AwaitResult.Cancelled           -> Exception.raiseGeneric "invocation cancelled" ()
+  go ()
+
+-- ── Handler arm helpers ───────────────────────────────────────────────────────
+
+Restate.Vm.hdlStateGet : Restate.Vm -> Text -> (Optional Bytes ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Vm.hdlStateGet vm key k =
+  notif = Restate.Vm.awaitHandle vm (Restate.Vm.sysStateGet vm key)
+  k (match notif with
+    Restate.NotifValue.NSuccess bs -> Some bs
+    _                              -> None)
+
+Restate.Vm.hdlStateKeys : Restate.Vm -> ([Text] ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Vm.hdlStateKeys vm k =
+  notif = Restate.Vm.awaitHandle vm (Restate.Vm.sysStateGetKeys vm)
+  k (match notif with
+    Restate.NotifValue.NStateKeys ks -> ks
+    _                                -> [])
+
+Restate.Vm.hdlSleep : Restate.Vm -> Text -> Nat -> (() ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Vm.hdlSleep vm name wakeMs k =
+  nh = Restate.Vm.sysSleep vm name wakeMs
+  _ = Restate.Vm.awaitHandle vm nh
+  k ()
+
+Restate.Vm.hdlSend : Restate.Vm -> Restate.Target -> Bytes -> Nat -> (() ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Vm.hdlSend vm target inp delay k =
+  _ = Restate.Vm.sysSend vm target inp delay
+  k ()
+
+Restate.Vm.hdlRun : Restate.Vm -> Text -> '{IO, Exception} Bytes -> (Bytes ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Vm.hdlRun vm name closure k =
+  rh = Restate.Vm.sysRun vm name
+  nh = Restate.RunHandle.rawHandle rh
+  result =
+    if Restate.RunHandle.replayed rh
+      then
+        match Restate.Vm.awaitHandle vm nh with
+          Restate.NotifValue.NSuccess bs -> bs
+          Restate.NotifValue.NFailure code msg ->
+            Exception.raiseGeneric ("run failed " ++ Nat.toText code ++ ": " ++ msg) ()
+          _ -> Bytes.empty
+      else
+        match Exception.catch closure with
+          Left failure ->
+            tf = Restate.TerminalFailure.TerminalFailure 500 (Failure.message failure)
+            Restate.Vm.proposeRunCompletion vm nh (Left tf)
+            Exception.raiseGeneric (Failure.message failure) ()
+          Right bs ->
+            Restate.Vm.proposeRunCompletion vm nh (Right bs)
+            bs
+  k result
+
+-- ── Handler interpreter ───────────────────────────────────────────────────────
+
+Restate.Vm.runHandler : Restate.Vm -> '{Restate.Ctx, Restate.State, IO, Exception} Bytes ->{IO, Exception} Bytes
+Restate.Vm.runHandler vm handler =
+  go : Request {Restate.Ctx, Restate.State} Bytes ->{IO, Exception} Bytes
+  go = cases
+    { result }                            -> result
+    { ctx.input -> k }                    -> handle k (Restate.Vm.sysInput vm) with go
+    { ctx.sleep name wakeMs -> k }        -> Restate.Vm.hdlSleep vm name wakeMs (r -> handle k r with go)
+    { ctx.call target inp -> k }          -> handle k (Restate.Vm.sysCall vm target inp) with go
+    { ctx.send target inp delay -> k }    -> Restate.Vm.hdlSend vm target inp delay (r -> handle k r with go)
+    { ctx.run name closure -> k }         -> Restate.Vm.hdlRun vm name closure (r -> handle k r with go)
+    { ctx.await nh -> k }                 -> handle k (Restate.Vm.awaitHandle vm nh) with go
+    { ctx.awakeable -> k }                -> handle k (Restate.Vm.sysAwakeable vm) with go
+    { ctx.completeAwakeable id res -> k } -> handle k (Restate.Vm.sysCompleteAwakeable vm id res) with go
+    { state.get key -> k }                -> Restate.Vm.hdlStateGet vm key (r -> handle k r with go)
+    { state.set key val -> k }            -> handle k (Restate.Vm.sysStateSet vm key val) with go
+    { state.clear key -> k }              -> handle k (Restate.Vm.sysStateClear vm key) with go
+    { state.clearAll -> k }               -> handle k (Restate.Vm.sysStateClearAll vm) with go
+    { state.keys -> k }                   -> Restate.Vm.hdlStateKeys vm (r -> handle k r with go)
+  handle !handler with go

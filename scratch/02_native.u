@@ -1,0 +1,462 @@
+use lib.unison_base_7_19_2
+use lib.unison_json_1_4_2
+
+-- ── Opaque VM handle ──────────────────────────────────────────────────────────
+
+type Restate.Vm = Vm Nat
+
+Restate.Vm.vmHandle : Restate.Vm -> Nat
+Restate.Vm.vmHandle = cases Vm n -> n
+
+-- ── Buffer I/O helpers ────────────────────────────────────────────────────────
+
+-- Allocate `cap`-byte output buffer, write via f, return bytes written
+Restate.Native.withOutBuf : Nat -> (Pinned {IO} -> Nat ->{IO} Int) ->{IO, Exception} Bytes
+Restate.Native.withOutBuf cap f =
+  buf = IO.Raw.pinnedByteArray cap
+  n = f buf cap
+  if n < +0
+    then Exception.raiseGeneric ("FFI error " ++ Int.toText n) ()
+    else
+      nNat = match Int.toNat n with
+        None   -> 0
+        Some x -> x
+      mutable.ByteArray.readBytes (Pinned.slice 0 nNat buf) 0 nNat
+
+-- Encode Bytes into a pinned input buffer; pass (pinned, len) to callback
+Restate.Native.withBytesIn : Bytes -> (Pinned {IO} -> Nat ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Native.withBytesIn bs f =
+  n = Bytes.size bs
+  cap = Nat.max n 1
+  pin = IO.Raw.pinnedByteArray cap
+  if n > 0 then mutable.ByteArray.writeBytes (Pinned.slice 0 n pin) 0 bs else ()
+  f pin n
+
+Restate.Native.withTextIn : Text -> (Pinned {IO} -> Nat ->{IO, Exception} a) ->{IO, Exception} a
+Restate.Native.withTextIn t f = Restate.Native.withBytesIn (Text.toUtf8 t) f
+
+-- ── Error helpers ─────────────────────────────────────────────────────────────
+
+Restate.Native.checkVoid : Text -> Int ->{Exception} ()
+Restate.Native.checkVoid name n =
+  if n < +0 then Exception.raiseGeneric (name ++ " failed") () else ()
+
+Restate.Native.checkHandle : Text -> Int ->{Exception} Nat
+Restate.Native.checkHandle name n =
+  if n < +0
+    then Exception.raiseGeneric (name ++ " failed") ()
+    else match Int.toNat n with
+        None   -> 0
+        Some x -> x
+
+-- ── JSON encoding (Unison → C) ────────────────────────────────────────────────
+
+Restate.Native.encodeHeaders : [(Text, Text)] -> Text
+Restate.Native.encodeHeaders hdrs =
+  pairs = List.map (cases (k, v) -> Json.Array [Json.Text k, Json.Text v]) hdrs
+  Json.toText (Json.Array pairs)
+
+Restate.Native.encodeFuture : Restate.Future -> Text
+Restate.Native.encodeFuture fut =
+  go = cases
+    Restate.Future.FutSingle h ->
+      Json.object [("tag", Json.Text "Single"), ("handle", Json.nat h)]
+    Restate.Future.FutFirstCompleted cs ->
+      Json.object [("tag", Json.Text "FirstCompleted"), ("children", Json.Array (List.map go cs))]
+    Restate.Future.FutAllCompleted cs ->
+      Json.object [("tag", Json.Text "AllCompleted"), ("children", Json.Array (List.map go cs))]
+    Restate.Future.FutFirstSucceededOrAllFailed cs ->
+      Json.object [("tag", Json.Text "FirstSucceededOrAllFailed"), ("children", Json.Array (List.map go cs))]
+    Restate.Future.FutAllSucceededOrFirstFailed cs ->
+      Json.object [("tag", Json.Text "AllSucceededOrFirstFailed"), ("children", Json.Array (List.map go cs))]
+  Json.toText (go fut)
+
+Restate.Native.optTextJson : Optional Text -> Json
+Restate.Native.optTextJson = cases
+  None   -> Json.Null
+  Some t -> Json.Text t
+
+Restate.Native.encodeTarget : Restate.Target -> Text
+Restate.Native.encodeTarget t =
+  Json.toText (Json.object [
+    ("service",        Json.Text (Restate.Target.service t)),
+    ("handler",        Json.Text (Restate.Target.handler t)),
+    ("key",            Restate.Native.optTextJson (Restate.Target.key t)),
+    ("idempotencyKey", Restate.Native.optTextJson (Restate.Target.idempotencyKey t))
+  ])
+
+Restate.Native.encodeFailure : Restate.TerminalFailure -> Bytes
+Restate.Native.encodeFailure tf =
+  Text.toUtf8 (Json.toText (Json.object [
+    ("code",    Json.nat (Restate.TerminalFailure.code tf)),
+    ("message", Json.Text (Restate.TerminalFailure.message tf))
+  ]))
+
+-- ── JSON decoding (C → Unison) ────────────────────────────────────────────────
+
+Restate.Native.decodeBytes : '{g, Decoder} a -> Bytes ->{g, Exception} a
+Restate.Native.decodeBytes dec bs = Decoder.run dec (Text.fromUtf8 bs)
+
+Restate.Native.decodeResponseHead : '{Decoder} Restate.ResponseHead
+Restate.Native.decodeResponseHead = do
+  status  = Decoder.object.at! "status"  Decoder.nat
+  headers = Decoder.object.at! "headers" (Decoder.array (Decoder.array2 Decoder.text Decoder.text))
+  Restate.ResponseHead.ResponseHead status headers
+
+Restate.Native.decodeAwaitResult : '{Decoder} Restate.AwaitResult
+Restate.Native.decodeAwaitResult = do
+  tag = Decoder.object.at! "tag" Decoder.text
+  match tag with
+    "AnyCompleted" -> Restate.AwaitResult.AnyCompleted
+    "WaitingExternalProgress" ->
+      wi = Decoder.object.at! "waitingInput" Decoder.boolean
+      wr = Decoder.object.at! "waitingRunProposal" Decoder.boolean
+      Restate.AwaitResult.WaitingExternal wi wr
+    "ExecuteRun" ->
+      h = Decoder.object.at! "handle" Decoder.nat
+      Restate.AwaitResult.ExecuteRun h
+    "CancelSignalReceived" -> Restate.AwaitResult.Cancelled
+    t -> Decoder.fail ("unknown AwaitResult: " ++ t)
+
+Restate.Native.decodeNotifValue : '{Exception, Decoder} Restate.NotifValue
+Restate.Native.decodeNotifValue = do
+  tag = Decoder.object.at! "tag" Decoder.text
+  match tag with
+    "Void" -> Restate.NotifValue.NVoid
+    "Success" ->
+      b64 = Decoder.object.at! "data" Decoder.text
+      bs  = Bytes.fromBase64 (Text.toUtf8 b64)
+      Restate.NotifValue.NSuccess bs
+    "Failure" ->
+      code = Decoder.object.at! "code" Decoder.nat
+      msg  = Decoder.object.at! "message" Decoder.text
+      Restate.NotifValue.NFailure code msg
+    "StateKeys" ->
+      keys = Decoder.object.at! "keys" (Decoder.array Decoder.text)
+      Restate.NotifValue.NStateKeys keys
+    "InvocationId" ->
+      id = Decoder.object.at! "id" Decoder.text
+      Restate.NotifValue.NInvocationId id
+    t -> Decoder.fail ("unknown NotifValue: " ++ t)
+
+Restate.Native.decodeInput : '{Exception, Decoder} Restate.Input
+Restate.Native.decodeInput = do
+  invocId  = Decoder.object.at! "invocationId" Decoder.text
+  seed     = Decoder.object.at! "randomSeed"   Decoder.nat
+  key      = Decoder.object.at! "key"          Decoder.text
+  headers  = Decoder.object.at! "headers"      (Decoder.array (Decoder.array2 Decoder.text Decoder.text))
+  b64      = Decoder.object.at! "input"        Decoder.text
+  inputBs  = Bytes.fromBase64 (Text.toUtf8 b64)
+  Restate.Input.Input invocId seed key headers inputBs
+
+Restate.Native.decodeCallHandles : '{Decoder} Restate.CallHandles
+Restate.Native.decodeCallHandles = do
+  ih = Decoder.object.at! "invocIdHandle" Decoder.nat
+  ch = Decoder.object.at! "callHandle"    Decoder.nat
+  Restate.CallHandles.CallHandles ih ch
+
+Restate.Native.decodeAwakeableHandle : '{Decoder} Restate.AwakeableHandle
+Restate.Native.decodeAwakeableHandle = do
+  id = Decoder.object.at! "id"     Decoder.text
+  h  = Decoder.object.at! "handle" Decoder.nat
+  Restate.AwakeableHandle.AwakeableHandle id h
+
+Restate.Native.decodeRunHandle : '{Decoder} Restate.RunHandle
+Restate.Native.decodeRunHandle = do
+  r = Decoder.object.at! "replayed" Decoder.boolean
+  h = Decoder.object.at! "handle"   Decoder.nat
+  Restate.RunHandle.RunHandle r h
+
+-- ── VM operations ─────────────────────────────────────────────────────────────
+
+Restate.Vm.libName : Text
+Restate.Vm.libName = "restate_sdk_unison_native"
+
+Restate.Vm.new : [(Text, Text)] ->{IO, Exception} Restate.Vm
+Restate.Vm.new headers =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_new"
+          (FFI.Spec.fnIO2 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.uint64)
+  h = Restate.Native.withTextIn (Restate.Native.encodeHeaders headers) (pin -> len ->
+    f pin len
+  )
+  if h == 0
+    then Exception.raiseGeneric "restate_vm_new failed" ()
+    else Restate.Vm.Vm h
+
+Restate.Vm.free : Restate.Vm ->{IO, Exception} ()
+Restate.Vm.free vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_free" (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.void)
+  f (Restate.Vm.vmHandle vm)
+
+Restate.Vm.getResponseHead : Restate.Vm ->{IO, Exception} Restate.ResponseHead
+Restate.Vm.getResponseHead vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_get_response_head"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  bs = Restate.Native.withOutBuf 4096 (buf -> cap -> f (Restate.Vm.vmHandle vm) buf cap)
+  Restate.Native.decodeBytes Restate.Native.decodeResponseHead bs
+
+Restate.Vm.notifyInput : Restate.Vm -> Bytes ->{IO, Exception} ()
+Restate.Vm.notifyInput vm bs =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_notify_input"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.void)
+  Restate.Native.withBytesIn bs (pin -> len -> f (Restate.Vm.vmHandle vm) pin len)
+
+Restate.Vm.notifyInputClosed : Restate.Vm ->{IO, Exception} ()
+Restate.Vm.notifyInputClosed vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_notify_input_closed"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.void)
+  f (Restate.Vm.vmHandle vm)
+
+Restate.Vm.notifyError : Restate.Vm -> Text -> Nat ->{IO, Exception} ()
+Restate.Vm.notifyError vm msg code =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_notify_error"
+          (FFI.Spec.fnIO4 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.uint32 FFI.Type.void)
+  Restate.Native.withTextIn msg (pin -> len -> f (Restate.Vm.vmHandle vm) pin len code)
+
+Restate.Vm.takeOutput : Restate.Vm -> Nat ->{IO, Exception} (Optional Bytes)
+Restate.Vm.takeOutput vm bufSize =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_take_output"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  buf = IO.Raw.pinnedByteArray bufSize
+  n   = f (Restate.Vm.vmHandle vm) buf bufSize
+  if n < +0 then None
+  else
+    nNat = match Int.toNat n with
+        None   -> 0
+        Some x -> x
+    Some (mutable.ByteArray.readBytes (Pinned.slice 0 nNat buf) 0 nNat)
+
+Restate.Vm.isReadyToExecute : Restate.Vm ->{IO, Exception} Boolean
+Restate.Vm.isReadyToExecute vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_is_ready_to_execute"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.int32)
+  match f (Restate.Vm.vmHandle vm) with
+    +1 -> true
+    +0 -> false
+    r  -> Exception.raiseGeneric ("is_ready_to_execute error: " ++ Int.toText r) ()
+
+Restate.Vm.vmState : Restate.Vm ->{IO, Exception} Int
+Restate.Vm.vmState vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_state"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.int32)
+  f (Restate.Vm.vmHandle vm)
+
+Restate.Vm.doAwait : Restate.Vm -> Restate.Future ->{IO, Exception} Restate.AwaitResult
+Restate.Vm.doAwait vm future =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_do_await"
+          (FFI.Spec.fnIO5 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn (Restate.Native.encodeFuture future) (fpin -> flen ->
+    Restate.Native.decodeBytes Restate.Native.decodeAwaitResult
+      (Restate.Native.withOutBuf 256 (rpin -> rcap ->
+        f (Restate.Vm.vmHandle vm) fpin flen rpin rcap
+      ))
+  )
+
+Restate.Vm.takeNotification : Restate.Vm -> Nat ->{IO, Exception} Restate.NotifValue
+Restate.Vm.takeNotification vm nh =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_take_notification"
+          (FFI.Spec.fnIO4 FFI.Type.uint64 FFI.Type.uint32 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  bs = Restate.Native.withOutBuf 65536 (buf -> cap -> f (Restate.Vm.vmHandle vm) nh buf cap)
+  Restate.Native.decodeBytes Restate.Native.decodeNotifValue bs
+
+Restate.Vm.sysInput : Restate.Vm ->{IO, Exception} Restate.Input
+Restate.Vm.sysInput vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_input"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  bs = Restate.Native.withOutBuf 65536 (buf -> cap -> f (Restate.Vm.vmHandle vm) buf cap)
+  Restate.Native.decodeBytes Restate.Native.decodeInput bs
+
+Restate.Vm.sysStateGet : Restate.Vm -> Text ->{IO, Exception} Nat
+Restate.Vm.sysStateGet vm key =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_state_get"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn key (pin -> len ->
+    Restate.Native.checkHandle "sys_state_get" (f (Restate.Vm.vmHandle vm) pin len)
+  )
+
+Restate.Vm.sysStateGetKeys : Restate.Vm ->{IO, Exception} Nat
+Restate.Vm.sysStateGetKeys vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_state_get_keys"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.checkHandle "sys_state_get_keys" (f (Restate.Vm.vmHandle vm))
+
+Restate.Vm.sysStateSet : Restate.Vm -> Text -> Bytes ->{IO, Exception} ()
+Restate.Vm.sysStateSet vm key val =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_state_set"
+          (FFI.Spec.fnIO5 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32)
+  Restate.Native.withTextIn key (kpin -> klen ->
+    Restate.Native.withBytesIn val (vpin -> vlen ->
+      Restate.Native.checkVoid "sys_state_set" (f (Restate.Vm.vmHandle vm) kpin klen vpin vlen)
+    )
+  )
+
+Restate.Vm.sysStateClear : Restate.Vm -> Text ->{IO, Exception} ()
+Restate.Vm.sysStateClear vm key =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_state_clear"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32)
+  Restate.Native.withTextIn key (pin -> len ->
+    Restate.Native.checkVoid "sys_state_clear" (f (Restate.Vm.vmHandle vm) pin len)
+  )
+
+Restate.Vm.sysStateClearAll : Restate.Vm ->{IO, Exception} ()
+Restate.Vm.sysStateClearAll vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_state_clear_all"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.int32)
+  Restate.Native.checkVoid "sys_state_clear_all" (f (Restate.Vm.vmHandle vm))
+
+Restate.Vm.sysSleep : Restate.Vm -> Text -> Nat ->{IO, Exception} Nat
+Restate.Vm.sysSleep vm name wakeUpMs =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_sleep"
+          (FFI.Spec.fnIO4 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn name (pin -> len ->
+    Restate.Native.checkHandle "sys_sleep" (f (Restate.Vm.vmHandle vm) pin len wakeUpMs)
+  )
+
+Restate.Vm.sysCall : Restate.Vm -> Restate.Target -> Bytes ->{IO, Exception} Restate.CallHandles
+Restate.Vm.sysCall vm target inputBs =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_call"
+          (FFI.Spec.fnIO7 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn (Restate.Native.encodeTarget target) (tpin -> tlen ->
+    Restate.Native.withBytesIn inputBs (ipin -> ilen ->
+      Restate.Native.decodeBytes Restate.Native.decodeCallHandles
+        (Restate.Native.withOutBuf 256 (rpin -> rcap ->
+          f (Restate.Vm.vmHandle vm) tpin tlen ipin ilen rpin rcap
+        ))
+    )
+  )
+
+Restate.Vm.sysSend : Restate.Vm -> Restate.Target -> Bytes -> Nat ->{IO, Exception} Nat
+Restate.Vm.sysSend vm target inputBs delayMs =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_send"
+          (FFI.Spec.fnIO8 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn (Restate.Native.encodeTarget target) (tpin -> tlen ->
+    Restate.Native.withBytesIn inputBs (ipin -> ilen ->
+      Decoder.run (do Decoder.object.at! "invocIdHandle" Decoder.nat)
+        (Text.fromUtf8
+          (Restate.Native.withOutBuf 256 (rpin -> rcap ->
+            f (Restate.Vm.vmHandle vm) tpin tlen ipin ilen delayMs rpin rcap
+          )))
+    )
+  )
+
+Restate.Vm.sysAwakeable : Restate.Vm ->{IO, Exception} Restate.AwakeableHandle
+Restate.Vm.sysAwakeable vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_awakeable"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  bs = Restate.Native.withOutBuf 512 (buf -> cap -> f (Restate.Vm.vmHandle vm) buf cap)
+  Restate.Native.decodeBytes Restate.Native.decodeAwakeableHandle bs
+
+Restate.Vm.sysCompleteAwakeable : Restate.Vm -> Text -> Either Restate.TerminalFailure Bytes ->{IO, Exception} ()
+Restate.Vm.sysCompleteAwakeable vm id result =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_complete_awakeable"
+          (FFI.Spec.fnIO6 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32 FFI.Type.int32)
+  (valBs, isSuccess) = match result with
+    Left tf -> (Restate.Native.encodeFailure tf, +0)
+    Right bs -> (bs, +1)
+  Restate.Native.withTextIn id (ipin -> ilen ->
+    Restate.Native.withBytesIn valBs (vpin -> vlen ->
+      Restate.Native.checkVoid "sys_complete_awakeable" (f (Restate.Vm.vmHandle vm) ipin ilen vpin vlen isSuccess)
+    )
+  )
+
+Restate.Vm.sysGetPromise : Restate.Vm -> Text ->{IO, Exception} Nat
+Restate.Vm.sysGetPromise vm key =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_get_promise"
+          (FFI.Spec.fnIO3 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn key (pin -> len ->
+    Restate.Native.checkHandle "sys_get_promise" (f (Restate.Vm.vmHandle vm) pin len)
+  )
+
+Restate.Vm.sysCompletePromise : Restate.Vm -> Text -> Either Restate.TerminalFailure Bytes ->{IO, Exception} Nat
+Restate.Vm.sysCompletePromise vm key result =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_complete_promise"
+          (FFI.Spec.fnIO8 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  (valBs, isSuccess) = match result with
+    Left tf -> (Restate.Native.encodeFailure tf, +0)
+    Right bs -> (bs, +1)
+  Restate.Native.withTextIn key (kpin -> klen ->
+    Restate.Native.withBytesIn valBs (vpin -> vlen ->
+      Decoder.run (do Decoder.object.at! "handle" Decoder.nat)
+        (Text.fromUtf8
+          (Restate.Native.withOutBuf 64 (rpin -> rcap ->
+            f (Restate.Vm.vmHandle vm) kpin klen vpin vlen isSuccess rpin rcap
+          )))
+    )
+  )
+
+Restate.Vm.sysRun : Restate.Vm -> Text ->{IO, Exception} Restate.RunHandle
+Restate.Vm.sysRun vm name =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_run"
+          (FFI.Spec.fnIO5 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int64)
+  Restate.Native.withTextIn name (pin -> len ->
+    Restate.Native.decodeBytes Restate.Native.decodeRunHandle
+      (Restate.Native.withOutBuf 128 (rpin -> rcap ->
+        f (Restate.Vm.vmHandle vm) pin len rpin rcap
+      ))
+  )
+
+Restate.Vm.proposeRunCompletion : Restate.Vm -> Nat -> Either Restate.TerminalFailure Bytes ->{IO, Exception} ()
+Restate.Vm.proposeRunCompletion vm nh result =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_propose_run_completion"
+          (FFI.Spec.fnIO5 FFI.Type.uint64 FFI.Type.uint32 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32 FFI.Type.int32)
+  (valBs, isSuccess) = match result with
+    Left tf -> (Restate.Native.encodeFailure tf, +0)
+    Right bs -> (bs, +1)
+  Restate.Native.withBytesIn valBs (vpin -> vlen ->
+    Restate.Native.checkVoid "propose_run_completion" (f (Restate.Vm.vmHandle vm) nh vpin vlen isSuccess)
+  )
+
+Restate.Vm.sysWriteOutput : Restate.Vm -> Either Restate.TerminalFailure Bytes ->{IO, Exception} ()
+Restate.Vm.sysWriteOutput vm result =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_write_output"
+          (FFI.Spec.fnIO4 FFI.Type.uint64 FFI.Type.pinnedByteArray FFI.Type.uint64 FFI.Type.int32 FFI.Type.int32)
+  (valBs, isSuccess) = match result with
+    Left tf -> (Restate.Native.encodeFailure tf, +0)
+    Right bs -> (bs, +1)
+  Restate.Native.withBytesIn valBs (vpin -> vlen ->
+    Restate.Native.checkVoid "sys_write_output" (f (Restate.Vm.vmHandle vm) vpin vlen isSuccess)
+  )
+
+Restate.Vm.sysEnd : Restate.Vm ->{IO, Exception} ()
+Restate.Vm.sysEnd vm =
+  dll = FFI.DLL.openByName Restate.Vm.libName
+  f   = FFI.DLL.getSymbol dll "restate_vm_sys_end"
+          (FFI.Spec.fnIO1 FFI.Type.uint64 FFI.Type.int32)
+  Restate.Native.checkVoid "sys_end" (f (Restate.Vm.vmHandle vm))
+
+-- Drain all output bytes from the VM (call after progress loop)
+Restate.Vm.takeAllOutput : Restate.Vm ->{IO, Exception} Bytes
+Restate.Vm.takeAllOutput vm =
+  go acc =
+    chunk = Restate.Vm.takeOutput vm 4096
+    match chunk with
+      None -> acc
+      Some bs -> go (acc ++ bs)
+  go Bytes.empty

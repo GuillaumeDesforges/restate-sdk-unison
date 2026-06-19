@@ -1,0 +1,69 @@
+use lib.unison_base_7_19_2
+use lib.unison_json_1_4_2
+
+-- ── Core types ──────────────────────────────────────────────────────────────
+
+type Restate.Serde a = Serde (a -> Bytes) (Bytes -> Either Text a)
+
+Restate.Serde.encode : Restate.Serde a -> a -> Bytes
+Restate.Serde.encode = cases
+  Serde enc _ -> enc
+
+Restate.Serde.decode : Restate.Serde a -> Bytes -> Either Text a
+Restate.Serde.decode = cases
+  Serde _ dec -> dec
+
+-- Invocation input from Restate runtime
+type Restate.Input = {
+  invocationId : Text,
+  randomSeed   : Nat,
+  key          : Text,
+  headers      : [(Text, Text)],
+  inputBytes   : Bytes
+}
+
+-- Service call target
+type Restate.Target = {
+  service        : Text,
+  handler        : Text,
+  key            : Optional Text,
+  idempotencyKey : Optional Text
+}
+
+-- Terminal failure (user-visible error)
+type Restate.TerminalFailure = { code : Nat, message : Text }
+
+-- Unresolved future tree (mirrors Rust's UnresolvedFuture)
+type Restate.Future
+  = FutSingle Nat
+  | FutFirstCompleted [Restate.Future]
+  | FutAllCompleted [Restate.Future]
+  | FutFirstSucceededOrAllFailed [Restate.Future]
+  | FutAllSucceededOrFirstFailed [Restate.Future]
+
+-- Result of a do_await call
+type Restate.AwaitResult
+  = AnyCompleted
+  | WaitingExternal Boolean Boolean   -- waiting_input, waiting_run_proposal
+  | ExecuteRun Nat                    -- run handle to execute
+  | Cancelled
+
+-- Value returned from take_notification
+type Restate.NotifValue
+  = NVoid
+  | NSuccess Bytes
+  | NFailure Nat Text                 -- code, message
+  | NStateKeys [Text]
+  | NInvocationId Text
+
+-- Run handle from sys_run
+type Restate.RunHandle = { replayed : Boolean, rawHandle : Nat }
+
+-- Awakeable handle from sys_awakeable
+type Restate.AwakeableHandle = { id : Text, rawHandle : Nat }
+
+-- Call handles from sys_call
+type Restate.CallHandles = { invocIdHandle : Nat, callHandle : Nat }
+
+-- Response head from the VM
+type Restate.ResponseHead = { status : Nat, headers : [(Text, Text)] }
