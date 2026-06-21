@@ -8,19 +8,25 @@ Build a Restate SDK for the Unison programming language, published as `@gdforj/r
 
 ## Status
 
-**Phase: Spike complete, no tests written yet.**
+**Phase: Stage 1 complete — package created, pure function tests green.**
 
 The scratch files typecheck, which proves type consistency. They do not prove correctness. The Rust cdylib has never been loaded at runtime, the FFI signatures have never been exercised, the VM protocol sequence has never been driven, and the HTTP endpoint has never spoken to a real Restate runtime. Nothing works until it is tested.
 
 The next phase is to write the actual Unison package using red-green-refactor TDD, treating the scratch files as a design reference rather than finished code.
 
-Spike (typechecked, untested):
-- 🟡 Rust FFI wrapper (`crates/restate-sdk-unison-native`) — compiles, never loaded
-- 🟡 Core types (`scratch/01_types.u`) — typechecked
-- 🟡 Native FFI bindings (`scratch/02_native.u`) — typechecked, FFI signatures unverified
-- 🟡 Ability layer (`scratch/03_ability.u`) — typechecked, VM protocol unverified
-- 🟡 HTTP endpoint (`scratch/04_endpoint.u`) — typechecked, never served a request
-- 🟡 Greeter example (`scratch/05_example.u`) — typechecked, never run
+Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
+- ✅ Core types + abilities — in package, Stage 1 tests green
+- ✅ `encodeDiscovery` — tested (red→green)
+- ✅ `flatHeaders` — tested (red→green)
+- ✅ `pathSegments` — tested (red→green)
+- ✅ `Serde` round-trip — tested
+- 🟡 Native FFI layer (`Restate.Vm.*`, `Restate.Native.*`) — in package, FFI signatures unverified
+- 🟡 Ability interpreter (`Restate.Vm.runHandler`) — in package, VM protocol unverified
+- 🟡 HTTP endpoint (`Restate.Endpoint.serve`) — in package, never served a request
+- 🟡 Greeter example (`Restate.Example.*`) — in package, never run
+
+Spike scratch files (reference only, superseded by package):
+- `scratch/01_types.u` through `scratch/05_example.u`
 
 ## Architecture decisions
 
