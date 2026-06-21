@@ -8,7 +8,9 @@ Build a Restate SDK for the Unison programming language, published as `@gdforj/r
 
 ## Status
 
-**Phase: Stage 4 complete — full integration with Restate runtime verified.**
+**Phase: Stage 5 complete — published to Unison Share.**
+
+Published at: https://share.unison-lang.org/@guillaumedesforges/restate-sdk-unison/code/main
 
 Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ Core types + abilities — in package, Stage 1 tests green
@@ -123,10 +125,10 @@ Tests:
 5. ✅ Greeter second call — state persisted, count = 2
 6. ✅ Admin API confirms Greeter service registration
 
-**Stage 5 — Package and publish**
-- Create the Unison package (not just a scratch project) under `@gdforj/restate-sdk-unison`
-- Promote tested definitions from scratch into the package
-- Publish to Unison Share
+**Stage 5 — Package and publish ✅**
+- README and API docs written (serve, Ctx, State, HandlerDef, ServiceDef)
+- Pushed to Unison Share as `@guillaumedesforges/restate-sdk-unison`
+- URL: https://share.unison-lang.org/@guillaumedesforges/restate-sdk-unison
 
 ## Key Unison syntax discoveries
 
