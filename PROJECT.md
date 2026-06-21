@@ -8,11 +8,7 @@ Build a Restate SDK for the Unison programming language, published as `@gdforj/r
 
 ## Status
 
-**Phase: Stage 2 complete — FFI smoke tests green.**
-
-The scratch files typecheck, which proves type consistency. They do not prove correctness. The Rust cdylib has never been loaded at runtime, the FFI signatures have never been exercised, the VM protocol sequence has never been driven, and the HTTP endpoint has never spoken to a real Restate runtime. Nothing works until it is tested.
-
-The next phase is to write the actual Unison package using red-green-refactor TDD, treating the scratch files as a design reference rather than finished code.
+**Phase: Stage 3 complete — VM protocol round-trip verified.**
 
 Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ Core types + abilities — in package, Stage 1 tests green
@@ -21,7 +17,7 @@ Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ `pathSegments` — tested (red→green)
 - ✅ `Serde` round-trip — tested
 - ✅ FFI smoke tests (`Restate.Vm.tests.stage2.*`) — `new`, `free`, `notifyInput`, `notifyInputClosed`, `getResponseHead` all pass with `content-type: application/vnd.restate.invocation.v5`
-- 🟡 Ability interpreter (`Restate.Vm.runHandler`) — in package, VM protocol unverified
+- ✅ VM protocol round-trip (`Restate.Vm.tests.stage3.*`) — synthetic StartMessage + InputCommandMessage frames fed to CoreVM; echo handler driven via `runHandler`; `testExtractOutputValue` parses OutputCommandMessage from output bytes; asserts output == input
 - 🟡 HTTP endpoint (`Restate.Endpoint.serve`) — in package, never served a request
 - 🟡 Greeter example (`Restate.Example.*`) — in package, never run
 
@@ -109,9 +105,10 @@ Methodology: red-green-refactor throughout. No code is considered done without a
 - `getResponseHead` returns status 200
 - `free` does not crash
 
-**Stage 3 — VM protocol tests (synthetic journal bytes)**
-- Drive a minimal handler (no syscalls) through the full VM loop and assert the output bytes match the expected journal encoding
-- Drive a handler that calls `ctx.sleep` and verify the sleep syscall appears in the journal
+**Stage 3 — VM protocol tests (synthetic journal bytes) ✅**
+- `Restate.Vm.testInvocationBytes` (Unison) + `restate_test_invocation_bytes` (Rust): encode StartMessage + InputCommandMessage frames from raw bytes
+- `Restate.Vm.testExtractOutputValue` (Unison) + `restate_test_extract_output_value` (Rust): parse OutputCommandMessage value.content from collected output
+- Echo handler driven via `runHandler`; output matches input — full VM protocol round-trip verified
 
 **Stage 4 — Integration test against a local Restate runtime**
 

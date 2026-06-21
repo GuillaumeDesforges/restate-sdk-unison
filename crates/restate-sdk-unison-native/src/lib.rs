@@ -760,3 +760,189 @@ pub unsafe extern "C" fn restate_vm_sys_end(vm: u64) -> i32 {
         Err(_) => -1,
     }
 }
+
+// ── Stage-3 test helpers ─────────────────────────────────────────────────────
+// Build minimal Restate wire frames for unit tests and parse them back out.
+// These are NOT part of the runtime ABI — only used by test programs.
+
+fn encode_varint(mut val: u64, buf: &mut Vec<u8>) {
+    loop {
+        let lo = (val & 0x7F) as u8;
+        val >>= 7;
+        if val == 0 {
+            buf.push(lo);
+            return;
+        }
+        buf.push(lo | 0x80);
+    }
+}
+
+fn proto_varint_field(field: u32, val: u64, buf: &mut Vec<u8>) {
+    encode_varint((field as u64) << 3, buf); // wire type 0
+    encode_varint(val, buf);
+}
+
+fn proto_bytes_field(field: u32, data: &[u8], buf: &mut Vec<u8>) {
+    encode_varint(((field as u64) << 3) | 2, buf); // wire type 2
+    encode_varint(data.len() as u64, buf);
+    buf.extend_from_slice(data);
+}
+
+fn restate_wire_frame(type_code: u16, body: &[u8]) -> Vec<u8> {
+    let header: u64 = ((type_code as u64) << 48) | (body.len() as u64);
+    let mut out = Vec::with_capacity(8 + body.len());
+    out.extend_from_slice(&header.to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// Build StartMessage (type 0x0000, known_entries=1) + InputCommandMessage (type 0x0400)
+/// frames for the given input payload.
+fn build_invocation_bytes(input: &[u8]) -> Vec<u8> {
+    let mut start_body = Vec::new();
+    proto_varint_field(3, 1, &mut start_body); // known_entries = 1
+
+    let mut value_body = Vec::new();
+    if !input.is_empty() {
+        proto_bytes_field(1, input, &mut value_body); // Value.content
+    }
+    let mut input_body = Vec::new();
+    proto_bytes_field(14, &value_body, &mut input_body); // InputCommandMessage.value
+
+    let mut out = restate_wire_frame(0x0000, &start_body);
+    out.extend(restate_wire_frame(0x0400, &input_body));
+    out
+}
+
+/// Write StartMessage + InputCommandMessage frames for `input` into `out_buf`.
+/// Returns bytes written (>= 0), or -2 if the buffer is too small.
+#[no_mangle]
+pub unsafe extern "C" fn restate_test_invocation_bytes(
+    input_ptr: *const u8,
+    input_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+) -> i64 {
+    let input = if input_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(input_ptr, input_len)
+    };
+    let frames = build_invocation_bytes(input);
+    if frames.len() > out_cap {
+        return -2;
+    }
+    std::ptr::copy_nonoverlapping(frames.as_ptr(), out_buf, frames.len());
+    frames.len() as i64
+}
+
+fn decode_varint_at(buf: &[u8], mut pos: usize) -> Option<(u64, usize)> {
+    let mut val: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        if pos >= buf.len() || shift > 63 {
+            return None;
+        }
+        let b = buf[pos];
+        pos += 1;
+        val |= ((b & 0x7F) as u64) << shift;
+        shift += 7;
+        if b & 0x80 == 0 {
+            return Some((val, pos));
+        }
+    }
+}
+
+fn skip_proto_field(buf: &[u8], pos: usize, wire: u8) -> Option<usize> {
+    match wire {
+        0 => decode_varint_at(buf, pos).map(|(_, n)| n),
+        1 => if pos + 8 <= buf.len() { Some(pos + 8) } else { None },
+        2 => {
+            let (len, n) = decode_varint_at(buf, pos)?;
+            let end = n + len as usize;
+            if end <= buf.len() { Some(end) } else { None }
+        }
+        5 => if pos + 4 <= buf.len() { Some(pos + 4) } else { None },
+        _ => None,
+    }
+}
+
+/// Extract Value.content bytes from the first OutputCommandMessage in `buf`.
+fn extract_output_value(buf: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0;
+    while pos + 8 <= buf.len() {
+        let header = u64::from_be_bytes(buf[pos..pos + 8].try_into().ok()?);
+        let type_code = (header >> 48) as u16;
+        let body_len = (header & 0xFFFF_FFFF) as usize;
+        let body = &buf[pos + 8..pos + 8 + body_len.min(buf.len().saturating_sub(pos + 8))];
+        if body.len() < body_len {
+            return None;
+        }
+        pos += 8 + body_len;
+
+        if type_code != 0x0401 {
+            continue;
+        }
+        // Scan OutputCommandMessage for field 14 (Value, wire type 2)
+        let mut bpos = 0;
+        while bpos < body.len() {
+            let (tag, after_tag) = decode_varint_at(body, bpos)?;
+            let field = (tag >> 3) as u32;
+            let wire = (tag & 7) as u8;
+            bpos = after_tag;
+            if field == 14 && wire == 2 {
+                let (vlen, after_vlen) = decode_varint_at(body, bpos)?;
+                let vlen = vlen as usize;
+                let value_bytes = &body[after_vlen..after_vlen + vlen.min(body.len() - after_vlen)];
+                if value_bytes.len() < vlen {
+                    return None;
+                }
+                // Parse Value { bytes content = 1 }
+                let mut vbpos = 0;
+                while vbpos < value_bytes.len() {
+                    let (vtag, after_vtag) = decode_varint_at(value_bytes, vbpos)?;
+                    let vfield = (vtag >> 3) as u32;
+                    let vwire = (vtag & 7) as u8;
+                    vbpos = after_vtag;
+                    if vfield == 1 && vwire == 2 {
+                        let (clen, after_clen) = decode_varint_at(value_bytes, vbpos)?;
+                        let clen = clen as usize;
+                        if after_clen + clen > value_bytes.len() {
+                            return None;
+                        }
+                        return Some(value_bytes[after_clen..after_clen + clen].to_vec());
+                    }
+                    vbpos = skip_proto_field(value_bytes, vbpos, vwire)?;
+                }
+                return Some(vec![]);
+            }
+            bpos = skip_proto_field(body, bpos, wire)?;
+        }
+    }
+    None
+}
+
+/// Extract Value.content from the first OutputCommandMessage in `data`.
+/// Returns bytes written (>= 0), -1 if not found, -2 if buffer too small.
+#[no_mangle]
+pub unsafe extern "C" fn restate_test_extract_output_value(
+    data_ptr: *const u8,
+    data_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+) -> i64 {
+    if data_len == 0 {
+        return -1;
+    }
+    let data = std::slice::from_raw_parts(data_ptr, data_len);
+    match extract_output_value(data) {
+        None => -1,
+        Some(content) => {
+            if content.len() > out_cap {
+                return -2;
+            }
+            std::ptr::copy_nonoverlapping(content.as_ptr(), out_buf, content.len());
+            content.len() as i64
+        }
+    }
+}
