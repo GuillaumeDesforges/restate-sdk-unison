@@ -119,7 +119,7 @@ Register the endpoint with Restate (once per endpoint start):
 ```bash
 curl -X POST http://localhost:9070/deployments \
   -H 'content-type: application/json' \
-  -d '{"uri": "http://localhost:9080"}'
+  -d '{"uri": "http://localhost:9080", "use_http_11": true}'
 ```
 
 Invoke a handler:
@@ -155,7 +155,7 @@ Key tools:
 
 **Workflow for writing Unison code:**
 1. Confirm type signatures before implementing (show user, wait for approval)
-2. Write code in a scratch file (`scratch/foo.u`)
+2. Write code in a temp scratch file (e.g. `/tmp/foo.u`)
 3. Typecheck with MCP after each function — never accumulate unchecked code
 4. Only show typechecked code to the user
 5. Use DEEP WORK mode for multi-function tasks

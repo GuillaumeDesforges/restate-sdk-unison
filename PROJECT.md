@@ -4,7 +4,7 @@
 
 ## Goal
 
-Build a Restate SDK for the Unison programming language, published as `@gdforj/restate-sdk-unison` on Unison Share. This enables Unison programs to participate in durable distributed systems powered by the Restate runtime.
+Build a Restate SDK for the Unison programming language, published as `@guillaumedesforges/restate-sdk-unison` on Unison Share. This enables Unison programs to participate in durable distributed systems powered by the Restate runtime.
 
 ## Status
 
@@ -23,9 +23,6 @@ Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ HTTP endpoint (`Restate.Endpoint.serve`) — serves discovery + handles invocations
 - ✅ Greeter example — full round-trip against Restate 1.6.2; state persists across calls
 - ✅ Integration tests (`scripts/test-integration.sh`) — all 6 tests pass (discovery, direct echo, Restate registration, Greeter count=1, count=2, admin API confirm)
-
-Spike scratch files (reference only, superseded by package):
-- `scratch/01_types.u` through `scratch/05_example.u`
 
 ## Architecture decisions
 
@@ -71,16 +68,15 @@ restatedev-sdk-unison/
 ├── flake.nix                       # Dev shell: unison-ucm + Rust toolchain
 ├── .mcp.json                       # Unison MCP server
 ├── .claude/settings.json           # enableAllProjectMcpServers: true
-├── crates/
-│   └── restate-sdk-unison-native/  # Rust cdylib: C ABI over CoreVM
-│       ├── Cargo.toml
-│       └── src/lib.rs
-└── scratch/                        # Unison scratch files (all typechecked & pushed)
-    ├── 01_types.u                  # Core types: Serde, Input, Target, Future, etc.
-    ├── 02_native.u                 # FFI bindings to the native library
-    ├── 03_ability.u                # Restate.Ctx + Restate.State abilities + runHandler
-    ├── 04_endpoint.u               # HTTP server: discovery + invocation dispatch
-    └── 05_example.u                # Greeter virtual object example
+├── .github/
+│   ├── workflows/ci.yml            # Build + symbol-check on push/PR (ubuntu-latest)
+│   └── workflows/release.yml       # Build + GitHub Release on v* tags (Linux + macOS ARM)
+├── scripts/
+│   └── test-integration.sh         # 6-test integration harness (requires nix develop .#integration)
+└── crates/
+    └── restate-sdk-unison-native/  # Rust cdylib: C ABI over CoreVM
+        ├── Cargo.toml
+        └── src/lib.rs
 ```
 
 UCM codebase at `~/.config/unisonlanguage/` (project: `scratch`, branch: `main`).
@@ -129,6 +125,10 @@ Tests:
 - README and API docs written (serve, Ctx, State, HandlerDef, ServiceDef)
 - Pushed to Unison Share as `@guillaumedesforges/restate-sdk-unison`
 - URL: https://share.unison-lang.org/@guillaumedesforges/restate-sdk-unison
+- GitHub repo: https://github.com/GuillaumeDesforges/restate-sdk-unison
+- CI workflow: builds and symbol-checks the native library on every push
+- Release workflow: builds prebuilt binaries (Linux x86_64, macOS ARM) and uploads to GitHub Releases on `v*` tags
+- v0.1.0 tagged and released
 
 ## Key Unison syntax discoveries
 
