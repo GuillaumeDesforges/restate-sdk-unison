@@ -63,6 +63,7 @@ Path parsing: `match HttpRequest.uri req with URI _ _ path _ _ -> Path.segments 
 
 ```
 restatedev-sdk-unison/
+├── README.md                       # Project README (installation, quick example, concepts)
 ├── CLAUDE.md                       # How to work in this repo (conventions, MCP, git)
 ├── PROJECT.md                      # Project state (this file)
 ├── flake.nix                       # Dev shell: unison-ucm + Rust toolchain
@@ -122,7 +123,8 @@ Tests:
 6. ✅ Admin API confirms Greeter service registration
 
 **Stage 5 — Package and publish ✅**
-- README and API docs written (serve, Ctx, State, HandlerDef, ServiceDef)
+- API docs written in UCM (serve, Ctx, State, HandlerDef, ServiceDef) and pushed to Unison Share
+- `README.md` written for the GitHub repo (installation, quick example, concepts, integration test instructions)
 - Pushed to Unison Share as `@guillaumedesforges/restate-sdk-unison`
 - URL: https://share.unison-lang.org/@guillaumedesforges/restate-sdk-unison
 - GitHub repo: https://github.com/GuillaumeDesforges/restate-sdk-unison
