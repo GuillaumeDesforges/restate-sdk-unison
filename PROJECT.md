@@ -66,6 +66,8 @@ restatedev-sdk-unison/
 ├── README.md                       # Project README (installation, quick example, concepts)
 ├── CLAUDE.md                       # How to work in this repo (conventions, MCP, git)
 ├── PROJECT.md                      # Project state (this file)
+├── Cargo.toml                      # Workspace root (members: crates/restate-sdk-unison-native)
+├── Cargo.lock
 ├── flake.nix                       # Dev shell: unison-ucm + Rust toolchain
 ├── .mcp.json                       # Unison MCP server
 ├── .claude/settings.json           # enableAllProjectMcpServers: true
@@ -80,7 +82,7 @@ restatedev-sdk-unison/
         └── src/lib.rs
 ```
 
-UCM codebase at `~/.config/unisonlanguage/` (project: `scratch`, branch: `main`).
+UCM codebase at `~/.config/unisonlanguage/` (project: `@gdforj/restate-sdk-unison`, branch: `main`).
 
 ## Reference repos (read-only, locally cloned)
 
@@ -240,9 +242,12 @@ No type errors on first typecheck.
 
 ### Step 7 — Greeter example (`scratch/05_example.u`)
 
-**What was done.** A virtual object handler (`Restate.Example.Greeter.greet`) that reads the caller's name from `ctx.input`, reads and increments a per-key counter via `state.get`/`state.set`, and returns a UTF-8 greeting. `Restate.Example.main` calls `Restate.Endpoint.serve 9080 [serviceDef]`.
+**What was done.** Two example services:
 
-No challenges. The patterns from earlier layers transferred directly. Typechecked first try.
+- `Restate.Example.Echo` — stateless service with `echoFn` that returns its input bytes unchanged. `Restate.Example.mainEcho` serves it on port 9080. Used as the direct-echo target in Stage 4 integration tests.
+- `Restate.Example.Greeter` — virtual object handler (`greet`) that reads the caller's name from `ctx.input`, reads and increments a per-key counter via `state.get`/`state.set`, and returns a UTF-8 greeting. `Restate.Example.main` serves it on port 9080.
+
+No challenges. The patterns from earlier layers transferred directly. Both typechecked first try.
 
 ---
 
