@@ -8,7 +8,7 @@ Build a Restate SDK for the Unison programming language, published as `@gdforj/r
 
 ## Status
 
-**Phase: Stage 1 complete — package created, pure function tests green.**
+**Phase: Stage 2 complete — FFI smoke tests green.**
 
 The scratch files typecheck, which proves type consistency. They do not prove correctness. The Rust cdylib has never been loaded at runtime, the FFI signatures have never been exercised, the VM protocol sequence has never been driven, and the HTTP endpoint has never spoken to a real Restate runtime. Nothing works until it is tested.
 
@@ -16,11 +16,11 @@ The next phase is to write the actual Unison package using red-green-refactor TD
 
 Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ Core types + abilities — in package, Stage 1 tests green
-- ✅ `encodeDiscovery` — tested (red→green)
+- ✅ `encodeDiscovery` — tested; **bug fixed**: was advertising protocol versions 1–3, must be 5–7
 - ✅ `flatHeaders` — tested (red→green)
 - ✅ `pathSegments` — tested (red→green)
 - ✅ `Serde` round-trip — tested
-- 🟡 Native FFI layer (`Restate.Vm.*`, `Restate.Native.*`) — in package, FFI signatures unverified
+- ✅ FFI smoke tests (`Restate.Vm.tests.stage2.*`) — `new`, `free`, `notifyInput`, `notifyInputClosed`, `getResponseHead` all pass with `content-type: application/vnd.restate.invocation.v5`
 - 🟡 Ability interpreter (`Restate.Vm.runHandler`) — in package, VM protocol unverified
 - 🟡 HTTP endpoint (`Restate.Endpoint.serve`) — in package, never served a request
 - 🟡 Greeter example (`Restate.Example.*`) — in package, never run
@@ -97,17 +97,17 @@ UCM codebase at `~/.config/unisonlanguage/` (project: `scratch`, branch: `main`)
 
 Methodology: red-green-refactor throughout. No code is considered done without a passing test. See CLAUDE.md for the full testing methodology.
 
-**Stage 1 — Unit tests for pure functions (no Rust required)**
-- JSON encoding: `encodeDiscovery` output matches expected string
-- Path parsing: `["greeter", "greet"]` extracted from a synthetic `HttpRequest`
-- `flatHeaders`: round-trips a known header map
+**Stage 1 — Unit tests for pure functions ✅**
+- `encodeDiscovery` output matches expected string
+- Path parsing extracts `["greeter", "greet"]` from a synthetic `HttpRequest`
+- `flatHeaders` round-trips a known header map
 - `Serde` encode/decode round-trips
 
-**Stage 2 — FFI smoke tests (requires `nix develop`)**
-- `Restate.Vm.new []` returns a valid handle (non-zero)
-- `Restate.Vm.notifyInput` + `notifyInputClosed` do not error
-- `Restate.Vm.getResponseHead` returns a parseable response
-- `Restate.Vm.free` does not crash
+**Stage 2 — FFI smoke tests ✅** (run with `nix develop .#default`)
+- `Restate.Vm.new [("content-type", "application/vnd.restate.invocation.v5")]` returns a valid handle
+- `notifyInput` + `notifyInputClosed` do not error
+- `getResponseHead` returns status 200
+- `free` does not crash
 
 **Stage 3 — VM protocol tests (synthetic journal bytes)**
 - Drive a minimal handler (no syscalls) through the full VM loop and assert the output bytes match the expected journal encoding
