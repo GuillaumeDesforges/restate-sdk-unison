@@ -18,9 +18,6 @@ jobs:
           - os: macos-latest
             artifact: librestate_sdk_unison_native.dylib
             target: aarch64-apple-darwin
-          - os: macos-13
-            artifact: librestate_sdk_unison_native.dylib
-            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
