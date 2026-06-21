@@ -29,6 +29,7 @@
             pkgs.cargo
             pkgs.rustc
             pkgs.gcc
+            pkgs.python3
           ];
           inherit shellHook;
         };
@@ -42,6 +43,7 @@
             pkgs.cargo
             pkgs.rustc
             pkgs.gcc
+            pkgs.python3
             pkgs.restate
             pkgs.curl
             pkgs.jq

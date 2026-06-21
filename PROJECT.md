@@ -8,18 +8,19 @@ Build a Restate SDK for the Unison programming language, published as `@gdforj/r
 
 ## Status
 
-**Phase: Stage 3 complete — VM protocol round-trip verified.**
+**Phase: Stage 4 complete — full integration with Restate runtime verified.**
 
 Package `@gdforj/restate-sdk-unison` (UCM codebase, branch `main`):
 - ✅ Core types + abilities — in package, Stage 1 tests green
-- ✅ `encodeDiscovery` — tested; **bug fixed**: was advertising protocol versions 1–3, must be 5–7
+- ✅ `encodeDiscovery` — tested; bugs fixed: protocol versions 5–7, `protocolMode: "REQUEST_RESPONSE"`, EXCLUSIVE handler type for virtual objects
 - ✅ `flatHeaders` — tested (red→green)
 - ✅ `pathSegments` — tested (red→green)
 - ✅ `Serde` round-trip — tested
-- ✅ FFI smoke tests (`Restate.Vm.tests.stage2.*`) — `new`, `free`, `notifyInput`, `notifyInputClosed`, `getResponseHead` all pass with `content-type: application/vnd.restate.invocation.v5`
-- ✅ VM protocol round-trip (`Restate.Vm.tests.stage3.*`) — synthetic StartMessage + InputCommandMessage frames fed to CoreVM; echo handler driven via `runHandler`; `testExtractOutputValue` parses OutputCommandMessage from output bytes; asserts output == input
-- 🟡 HTTP endpoint (`Restate.Endpoint.serve`) — in package, never served a request
-- 🟡 Greeter example (`Restate.Example.*`) — in package, never run
+- ✅ FFI smoke tests (`Restate.Vm.tests.stage2.*`) — `new`, `free`, `notifyInput`, `notifyInputClosed`, `getResponseHead` all pass
+- ✅ VM protocol round-trip (`Restate.Vm.tests.stage3.*`) — synthetic frames, echo handler, output extraction
+- ✅ HTTP endpoint (`Restate.Endpoint.serve`) — serves discovery + handles invocations
+- ✅ Greeter example — full round-trip against Restate 1.6.2; state persists across calls
+- ✅ Integration tests (`scripts/test-integration.sh`) — all 6 tests pass (discovery, direct echo, Restate registration, Greeter count=1, count=2, admin API confirm)
 
 Spike scratch files (reference only, superseded by package):
 - `scratch/01_types.u` through `scratch/05_example.u`
@@ -110,17 +111,17 @@ Methodology: red-green-refactor throughout. No code is considered done without a
 - `Restate.Vm.testExtractOutputValue` (Unison) + `restate_test_extract_output_value` (Rust): parse OutputCommandMessage value.content from collected output
 - Echo handler driven via `runHandler`; output matches input — full VM protocol round-trip verified
 
-**Stage 4 — Integration test against a local Restate runtime**
+**Stage 4 — Integration test against a local Restate runtime ✅**
 
-Infrastructure (all in `nix develop`, no separate installs):
-- `restate-server` (nixpkgs 1.6.2) — the runtime under test
-- `curl` + `jq` — registration and invocation scripting
+Script: `scripts/test-integration.sh` (run via `nix develop .#integration --command bash scripts/test-integration.sh`)
 
-Test cases:
-- `GET /discover` returns discovery JSON that Restate's admin API accepts without error
-- `POST /Greeter/greet` with key `alice` and body `Alice` returns the expected greeting bytes
-- Second invocation with the same key returns count = 2 (state persisted across calls)
-- Kill the SDK endpoint mid-invocation, restart it — Restate re-drives the handler and produces the same result (replay correctness)
+Tests:
+1. ✅ Discovery — `GET /discover` returns valid manifest (protocolMode, service names, EXCLUSIVE handler for virtual objects)
+2. ✅ Direct echo — `POST /Echo/echo` with binary framing returns input bytes
+3. ✅ Restate server starts and accepts registration
+4. ✅ Greeter first call — returns greeting with count = 1
+5. ✅ Greeter second call — state persisted, count = 2
+6. ✅ Admin API confirms Greeter service registration
 
 **Stage 5 — Package and publish**
 - Create the Unison package (not just a scratch project) under `@gdforj/restate-sdk-unison`
@@ -238,3 +239,21 @@ No type errors on first typecheck.
 **What was done.** A virtual object handler (`Restate.Example.Greeter.greet`) that reads the caller's name from `ctx.input`, reads and increments a per-key counter via `state.get`/`state.set`, and returns a UTF-8 greeting. `Restate.Example.main` calls `Restate.Endpoint.serve 9080 [serviceDef]`.
 
 No challenges. The patterns from earlier layers transferred directly. Typechecked first try.
+
+---
+
+### Step 8 — Stage 4 integration tests (`scripts/test-integration.sh`)
+
+**What was done.** Wrote a shell script that: (1) starts `ucm transcript.in-place` as a background server, (2) polls until port 9080 is ready, (3) runs discovery and direct echo tests, (4) optionally starts `restate-server` and runs the full Restate registration + invocation flow. All 6 tests pass.
+
+**Challenge: discovery content-type.** Restate 1.6.2 requires `content-type: application/vnd.restate.endpointmanifest.v4+json`. Our initial implementation returned `application/json`. Fix: updated `Restate.Endpoint.serve`'s discovery handler to use the versioned content-type.
+
+**Challenge: `protocolMode` field.** Restate requires `"protocolMode": "REQUEST_RESPONSE"` in the manifest for HTTP/1.1 endpoints. Added to `encodeDiscovery`.
+
+**Challenge: Restate uses `/invoke/{service}/{handler}` paths.** Restate does NOT send invocations to `/{service}/{handler}`. It sends to `/invoke/{service}/{handler}`. The key (for virtual objects) is embedded in the binary StartMessage frame body, not the URL. Fix: updated routing to match `["invoke", svcName, hdlName]` in addition to the direct `[svcName, hdlName]` form used in tests.
+
+**Challenge: virtual object handlers must be `EXCLUSIVE`.** `SHARED` handlers cannot write state. Our `encodeDiscovery` was hardcoding `"ty": "SHARED"` for all handlers. Virtual object handlers that write state must be `"EXCLUSIVE"`. Fix: `encodeHdl` now derives the handler type from the service kind — `RsService` → `"SHARED"`, `RsVirtualObject` → `"EXCLUSIVE"`.
+
+**Challenge: restate-server persists state in `~/.restate`.** When restarting `restate-server` between test runs, it was loading the old deployment registration (with the wrong `SHARED` handler type) from disk. Fix: added `--base-dir $(mktemp -d)` to use a fresh temporary directory per test run. The temp dir is cleaned up by the `cleanup` trap.
+
+**Challenge: HTTP/2 vs HTTP/1.1.** Restate tries HTTP/2 for service registration by default. `unison_http_16_1_0` only speaks HTTP/1.1. Fix: added `"use_http_11": true` to the registration JSON payload.
