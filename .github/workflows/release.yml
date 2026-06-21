@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build native library (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: librestate_sdk_unison_native.so
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            artifact: librestate_sdk_unison_native.dylib
+            target: aarch64-apple-darwin
+          - os: macos-13
+            artifact: librestate_sdk_unison_native.dylib
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --manifest-path crates/restate-sdk-unison-native/Cargo.toml
+
+      - name: Rename artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cp target/release/librestate_sdk_unison_native.dylib \
+             librestate_sdk_unison_native-${{ matrix.target }}.dylib
+
+      - name: Rename artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cp target/release/librestate_sdk_unison_native.so \
+             librestate_sdk_unison_native-${{ matrix.target }}.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: librestate_sdk_unison_native-${{ matrix.target }}.*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librestate_sdk_unison_native-*
+          generate_release_notes: true

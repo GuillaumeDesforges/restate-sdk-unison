@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    name: Build native library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --manifest-path crates/restate-sdk-unison-native/Cargo.toml
+
+      - name: Check symbols
+        run: |
+          nm -D target/release/librestate_sdk_unison_native.so \
+            | grep -E "restate_vm_(new|free|notify_input|get_response_head|take_output)" \
+            | wc -l \
+            | xargs -I{} test {} -ge 5
